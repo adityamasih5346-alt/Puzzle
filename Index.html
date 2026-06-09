@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Super Rope Hero</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; user-select:none; }
+  body { background:#0a0a18; font-family:Arial, sans-serif; overflow:hidden; }
+  #game { display:block; background:linear-gradient(#1b2a4a,#3a5a8a 60%,#5a7a3a 60%); }
+  #hud { position:fixed; top:10px; left:10px; color:#fff; font-size:14px; z-index:10; }
+  .bar { width:180px; height:14px; background:#222; border:2px solid #000; border-radius:8px; margin:4px 0; overflow:hidden; }
+  .bar > div { height:100%; transition:width .15s; }
+  #hp > div { background:#e63946; }
+  #st > div { background:#2a9d8f; }
+  #stats { background:rgba(0,0,0,.4); padding:6px 10px; border-radius:8px; display:inline-block; }
+  #controls { position:fixed; bottom:14px; right:14px; display:flex; gap:10px; z-index:10; }
+  .btn {
+    width:64px; height:64px; border-radius:50%; border:none;
+    background:rgba(255,255,255,.15); color:#fff; font-weight:bold;
+    font-size:13px; backdrop-filter:blur(4px); touch-action:none;
+  }
+  .btn:active { background:rgba(255,255,255,.4); }
+  #joystick { position:fixed; bottom:30px; left:30px; width:120px; height:120px;
+    background:rgba(255,255,255,.1); border-radius:50%; z-index:10; }
+  #stick { position:absolute; left:35px; top:35px; width:50px; height:50px;
+    background:rgba(255,255,255,.4); border-radius:50%; }
+  #msg { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    color:#fff; font-size:32px; text-shadow:0 0 10px #000; z-index:20; text-align:center; }
+  #hint { position:fixed; bottom:110px; left:50%; transform:translateX(-50%);
+    color:#ffd166; font-size:12px; z-index:10; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div id="stats">⭐ Lv <span id="lvl">1</span> &nbsp; 🪙 <span id="coins">0</span> &nbsp; 💀 <span id="kills">0</span></div>
+  <div class="bar" id="hp"><div style="width:100%"></div></div>
+  <div class="bar" id="st"><div style="width:100%"></div></div>
+</div>
+
+<div id="joystick"><div id="stick"></div></div>
+<div id="controls">
+  <button class="btn" id="ropeBtn">ROPE</button>
+  <button class="btn" id="jumpBtn">JUMP</button>
+  <button class="btn" id="atkBtn">PUNCH</button>
+</div>
+<div id="hint">Move: joystick • ROPE: swing to ceiling • JUMP: super jump • PUNCH: attack enemies</div>
+<div id="msg"></div>
+
+<script>
+const cv = document.getElementById('game'), ctx = cv.getContext('2d');
+let W,H; function resize(){ W=cv.width=innerWidth; H=cv.height=innerHeight; }
+resize(); addEventListener('resize', resize);
+
+const WORLD = 4000, GROUND = () => H - 80;
+
+// Player
+const p = {
+  x:300, y:0, vx:0, vy:0, w:34, h:54, onGround:false,
+  hp:100, st:100, facing:1, attacking:0,
+  roping:false, ropeX:0, ropeY:0, ropeLen:0, swingAng:0, swingVel:0
+};
+let camX = 0;
+let coins=0, kills=0, lvl=1, xp=0;
+
+// Input
+const keys={left:false,right:false};
+let moveX=0;
+
+// Joystick
+const joy=document.getElementById('joystick'), stick=document.getElementById('stick');
+let joyId=null, joyCx=0, joyCy=0;
+function joyStart(e){ const t=e.changedTouches?e.changedTouches[0]:e; joyId=t.identifier??'m';
+  const r=joy.getBoundingClientRect(); joyCx=r.left+60; joyCy=r.top+60; }
+function joyMove(e){ if(joyId===null)return;
+  const ts=e.changedTouches?[...e.changedTouches]:[e];
+  for(const t of ts){ if((t.identifier??'m')!==joyId) continue;
+    let dx=t.clientX-joyCx, dy=t.clientY-joyCy;
+    const d=Math.hypot(dx,dy), max=40; if(d>max){dx*=max/d;dy*=max/d;}
+    stick.style.left=(35+dx)+'px'; stick.style.top=(35+dy)+'px';
+    moveX=dx/max; }}
+function joyEnd(){ joyId=null; moveX=0; stick.style.left='35px'; stick.style.top='35px'; }
+joy.addEventListener('touchstart',joyStart); joy.addEventListener('touchmove',e=>{joyMove(e);e.preventDefault();});
+joy.addEventListener('touchend',joyEnd);
+joy.addEventListener('mousedown',joyStart); addEventListener('mousemove',joyMove); addEventListener('mouseup',joyEnd);
+
+// Keyboard
+addEventListener('keydown',e=>{ if(e.key==='ArrowLeft'||e.key==='a')moveX=-1;
+  if(e.key==='ArrowRight'||e.key==='d')moveX=1;
+  if(e.key===' ')doJump(); if(e.key==='f')doAttack(); if(e.key==='r')toggleRope(); });
+addEventListener('keyup',e=>{ if(['ArrowLeft','a','ArrowRight','d'].includes(e.key))moveX=0; });
+
+// Buttons
+function bindBtn(id,fn){ const b=document.getElementById(id);
+  b.addEventListener('touchstart',e=>{e.preventDefault();fn();});
+  b.addEventListener('mousedown',fn); }
+bindBtn('jumpBtn',doJump); bindBtn('atkBtn',doAttack); bindBtn('ropeBtn',toggleRope);
+
+// Buildings
+const buildings=[];
+for(let x=200;x<WORLD;x+=Math.random()*200+260){
+  const bw=120+Math.random()*100, bh=200+Math.random()*240;
+  buildings.push({x,w:bw,h:bh,c:`hsl(${210+Math.random()*30},30%,${25+Math.random()*15}%)`});
+}
+
+// Enemies
+const enemies=[];
+function spawnEnemy(x){ enemies.push({x,y:0,vy:0,hp:40,w:30,h:50,dead:false,hit:0,dir:1}); }
+for(let i=0;i<14;i++) spawnEnemy(500+Math.random()*WORLD);
+
+// Coins
+const coinItems=[];
+for(let i=0;i<40;i++) coinItems.push({x:300+Math.random()*WORLD, y:GROUND()-Math.random()*250-40, got:false, a:Math.random()*6});
+
+function doJump(){
+  if(p.roping){ // launch off rope
+    p.roping=false;
+    p.vx=Math.cos(p.swingAng+Math.PI/2)*p.swingVel*p.ropeLen*0.9;
+    p.vy=Math.sin(p.swingAng+Math.PI/2)*p.swingVel*p.ropeLen*0.9 - 8;
+    return;
+  }
+  if(p.onGround){ p.vy=-26; p.onGround=false; } // super jump
+}
+function doAttack(){ if(p.attacking<=0) p.attacking=12; }
+function toggleRope(){
+  if(p.roping){ p.roping=false; return; }
+  // find ceiling above & ahead
+  const tx=p.x+p.facing*80;
+  let best=null,bd=1e9;
+  for(const b of buildings){
+    if(tx>b.x-20 && tx<b.x+b.w+20){
+      const topY=GROUND()-b.h;
+      if(topY<p.y){ const d=p.y-topY; if(d<bd){bd=d;best={x:b.x+b.w/2,y:topY};} }
+    }
+  }
+  if(best && p.st>10){
+    p.roping=true; p.ropeX=best.x; p.ropeY=best.y;
+    const dx=p.x-p.ropeX, dy=p.y-p.ropeY;
+    p.ropeLen=Math.hypot(dx,dy); p.swingAng=Math.atan2(dy,dx); p.swingVel=p.vx*0.002;
+    p.st-=8;
+  } else { showMsg('No anchor!',40); }
+}
+
+let msgT=0,msgTxt='';
+function showMsg(t,f){ msgTxt=t; msgT=f; }
+
+function update(){
+  // movement
+  if(!p.roping){
+    if(moveX!==0){ p.vx+=moveX*1.4; p.facing=moveX>0?1:-1; if(p.st>0&&Math.abs(moveX)>.5)p.st-=0.1; }
+    p.vx*=0.85;
+    p.vy+=1.3;
+    p.x+=p.vx; p.y+=p.vy;
+    const g=GROUND()-p.h;
+    if(p.y>=g){ p.y=g; p.vy=0; p.onGround=true; } else p.onGround=false;
+  } else {
+    // rope physics (pendulum)
+    const grav=0.004;
+    p.swingVel += -grav*Math.cos(p.swingAng);
+    if(moveX!==0) p.swingVel += moveX*0.0008;
+    p.swingVel*=0.995;
+    p.swingAng+=p.swingVel;
+    p.x=p.ropeX+Math.cos(p.swingAng)*p.ropeLen;
+    p.y=p.ropeY+Math.sin(p.swingAng)*p.ropeLen;
+    p.facing=p.swingVel>0?1:-1;
+    p.vx=Math.cos(p.swingAng+Math.PI/2)*p.swingVel*p.ropeLen;
+  }
+  if(p.x<20)p.x=20; if(p.x>WORLD)p.x=WORLD;
+
+  // stamina regen
+  if(p.st<100) p.st+=0.15;
+
+  // attack
+  if(p.attacking>0){
+    p.attacking--;
+    for(const e of enemies){ if(e.dead)continue;
+      if(Math.abs((p.x+p.facing*40)-e.x)<50 && Math.abs(p.y-e.y)<60){
+        if(p.attacking===11){ e.hp-=20; e.hit=8; e.vy=-6; e.x+=p.facing*14;
+          if(e.hp<=0){ e.dead=true; kills++; coins+=15; gainXP(20); } }
+      }
+    }
+  }
+
+  // enemies
+  for(const e of enemies){
+    if(e.dead) continue;
+    e.vy+=1.3; e.y+=e.vy;
+    const g=GROUND()-e.h; if(e.y>=g){e.y=g;e.vy=0;}
+    if(e.hit>0)e.hit--;
+    // chase player
+    const dx=p.x-e.x;
+    if(Math.abs(dx)<400){ e.x+=Math.sign(dx)*1.2; e.dir=Math.sign(dx); }
+    // damage player
+    if(Math.abs(dx)<40 && Math.abs(p.y-e.y)<55 && !p.roping){
+      p.hp-=0.3;
+    }
+  }
+
+  if(p.hp<=0){ p.hp=100;p.st=100;p.x=300;p.y=0; coins=Math.max(0,coins-50); showMsg('DOWN! Respawning...',80); }
+
+  // coins
+  for(const c of coinItems){ if(c.got)continue; c.a+=0.1;
+    if(Math.abs(c.x-p.x)<40 && Math.abs(c.y-p.y)<60){ c.got=true; coins+=5; gainXP(5); } }
+
+  // camera
+  camX += ((p.x-W/2)-camX)*0.1;
+  if(camX<0)camX=0; if(camX>WORLD-W)camX=WORLD-W;
+
+  // HUD
+  document.querySelector('#hp>div').style.width=Math.max(0,p.hp)+'%';
+  document.querySelector('#st>div').style.width=Math.max(0,p.st)+'%';
+  document.getElementById('coins').textContent=coins;
+  document.getElementById('kills').textContent=kills;
+  document.getElementById('lvl').textContent=lvl;
+
+  if(msgT>0){ msgT--; document.getElementById('msg').textContent=msgTxt; }
+  else document.getElementById('msg').textContent='';
+}
+
+function gainXP(n){ xp+=n; if(xp>=lvl*100){ xp=0; lvl++; p.hp=100; showMsg('LEVEL UP! '+lvl,60);} }
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // sky gradient already via CSS bg; draw moving clouds
+  ctx.fillStyle='rgba(255,255,255,.15)';
+  for(let i=0;i<6;i++){ const cx=((i*700 - camX*0.3)%(WORLD))%(W+200)-100;
+    ctx.beginPath(); ctx.ellipse(cx,80+i*20,60,22,0,0,7); ctx.fill(); }
+
+  ctx.save(); ctx.translate(-camX,0);
+
+  // buildings
+  for(const b of buildings){
+    const y=GROUND()-b.h;
+    ctx.fillStyle=b.c; ctx.fillRect(b.x,y,b.w,b.h);
+    // windows
+    ctx.fillStyle='rgba(255,230,120,.5)';
+    for(let wx=b.x+12;wx<b.x+b.w-14;wx+=26)
+      for(let wy=y+16;wy<GROUND()-20;wy+=34)
+        ctx.fillRect(wx,wy,14,20);
+  }
+
+  // ground
+  ctx.fillStyle='#3a5a2a'; ctx.fillRect(0,GROUND(),WORLD,H);
+  ctx.fillStyle='#555'; ctx.fillRect(0,GROUND(),WORLD,8);
+
+  // coins
+  for(const c of coinItems){ if(c.got)continue;
+    ctx.fillStyle='#ffd166'; ctx.beginPath();
+    ctx.ellipse(c.x,c.y,8,8+Math.sin(c.a)*2,0,0,7); ctx.fill();
+    ctx.strokeStyle='#c79a30'; ctx.stroke(); }
+
+  // enemies
+  for(const e of enemies){ if(e.dead)continue;
+    ctx.fillStyle=e.hit>0?'#fff':'#b33'; 
+    ctx.fillRect(e.x-e.w/2,e.y,e.w,e.h);
+    ctx.fillStyle='#400'; ctx.fillRect(e.x-e.w/2,e.y,e.w,12); // head band
+    // hp bar
+    ctx.fillStyle='#000'; ctx.fillRect(e.x-16,e.y-10,32,5);
+    ctx.fillStyle='#0f0'; ctx.fillRect(e.x-16,e.y-10,32*(e.hp/40),5);
+  }
+
+  // rope
+  if(p.roping){
+    ctx.strokeStyle='#fff'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(p.ropeX,p.ropeY);
+    ctx.lineTo(p.x+p.w/2,p.y+10); ctx.stroke();
+    ctx.fillStyle='#ffd166'; ctx.beginPath(); ctx.arc(p.ropeX,p.ropeY,5,0,7); ctx.fill();
+  }
+
+  // player (hero)
+  ctx.fillStyle='#2b6cb0';
+  ctx.fillRect(p.x,p.y,p.w,p.h);
+  ctx.fillStyle='#1a1a1a'; ctx.fillRect(p.x+4,p.y+4,p.w-8,16); // mask
+  ctx.fillStyle='#fff'; // eyes
+  ctx.fillRect(p.x+(p.facing>0?20:6),p.y+8,8,5);
+  // attack swing
+  if(p.attacking>6){ ctx.fillStyle='rgba(255,255,255,.7)';
+    ctx.beginPath(); ctx.arc(p.x+p.w/2+p.facing*40,p.y+25,22,0,7); ctx.fill(); }
+
+  ctx.restore();
+}
+
+function loop(){ update(); draw(); requestAnimationFrame(loop); }
+loop();
+showMsg('SUPER ROPE HERO',60);
+</script>
+</body>
+</html>
